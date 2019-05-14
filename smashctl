@@ -1,0 +1,46 @@
+#!/usr/bin/env python
+#
+# This file is part of antiSMASH.
+#
+# antiSMASH is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# antiSMASH is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with antiSMASH.  If not, see <http://www.gnu.org/licenses/>.
+
+import argparse
+import os
+from dispatcher.ctl.job import setup_job_options
+from dispatcher.ctl.control import setup_control_options
+from dispatcher.ctl.notice import setup_notice_options
+from dispatcher.storage import get_storage
+
+
+def main():
+    '''Run the control script'''
+    queue_default = os.getenv('AS_QUEUE', 'redis://localhost:6379/0')
+    parser = argparse.ArgumentParser(prog="smashctl")
+    parser.add_argument('-q', '--queue', dest="queue",
+                        help="URI of the database containing the job queue (default: {})".format(queue_default),
+                        default=queue_default)
+
+    subparsers = parser.add_subparsers(title='subcommands')
+    setup_job_options(subparsers)
+    setup_control_options(subparsers)
+    setup_notice_options(subparsers)
+
+    args = parser.parse_args()
+    args.redis_store = get_storage(args.queue)
+
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

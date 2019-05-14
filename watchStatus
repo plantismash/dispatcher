@@ -1,0 +1,83 @@
+#!/usr/bin/env python
+#
+# This file is part of antiSMASH.
+#
+# antiSMASH is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# antiSMASH is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with antiSMASH.  If not, see <http://www.gnu.org/licenses/>.
+"""Watch the status directory for status updates from jobs
+"""
+import os
+from os import path
+import pyinotify
+from argparse import ArgumentParser
+from datetime import datetime
+from dispatcher.storage import get_storage
+
+
+version = "0.0.2"
+
+class EventHandler(pyinotify.ProcessEvent):
+    """Event handler to grab modify events"""
+    def __init__(self, redis_store):
+        self.redis_store = redis_store
+
+    def get_job_id(self, event):
+        return path.basename(event.pathname)
+
+    def process_IN_CREATE(self, event):
+        print "New job '%s'" % self.get_job_id(event)
+
+    def process_IN_DELETE(self, event):
+        print "Removing job '%s'" % self.get_job_id(event)
+
+    def process_IN_MODIFY(self, event):
+        jobid  = u'job:%s' % self.get_job_id(event)
+        fh = None
+        try:
+            fh = open(event.pathname, 'r')
+            status = fh.readline().strip()
+            self.redis_store.hset(jobid, 'status', status)
+            self.redis_store.hset(jobid, 'last_changed', datetime.utcnow())
+        except IOError, e:
+            print "Failed to get info for '%s': %s" % (jobid, e)
+        finally:
+            if fh is not None:
+                fh.close()
+
+
+def main():
+    """Parse the command line, set up the database, start the main loop"""
+    default_queue = os.getenv('AS_QUEUE', "redis://localhost:6379/0")
+    parser = ArgumentParser(version=version)
+    parser.add_argument('-q', '--queue', dest="queue",
+                        help="URI of the database containing the job queue (default: %(default)s)",
+                        default=default_queue)
+    parser.add_argument('-s', '--statusdir', dest="statusdir",
+                        default="/tmp/antismash_status",
+                        help="Directory to keep job status files in (default: %(default)s)")
+    options = parser.parse_args()
+
+    redis_store = get_storage(options.queue)
+    if not path.isdir(options.statusdir):
+        os.mkdir(options.statusdir)
+
+    wm = pyinotify.WatchManager()
+    mask = pyinotify.IN_DELETE | pyinotify.IN_CREATE | pyinotify.IN_MODIFY
+
+    handler = EventHandler(redis_store)
+    notifier = pyinotify.Notifier(wm, handler)
+    wdd = wm.add_watch(options.statusdir, mask, rec=True)
+    notifier.loop()
+
+if __name__ == "__main__":
+    main()

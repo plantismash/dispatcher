@@ -1,0 +1,520 @@
+#!/usr/bin/env python
+#
+# This file is part of antiSMASH.
+#
+# antiSMASH is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# antiSMASH is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with antiSMASH.  If not, see <http://www.gnu.org/licenses/>.
+"""Get new pending jobs from the job queue and dispatch them
+
+For now, only use a single dispatcher process and a SQLite DB
+"""
+import os
+import sys
+from os import path
+import logging
+import subprocess32 as sp
+import requests
+import time
+from signal import SIGKILL
+from optparse import OptionParser
+from datetime import datetime
+from httplib import IncompleteRead
+from dispatcher.models import Job, Control
+from dispatcher.mail import send_mail, send_error_mail
+from dispatcher.storage import get_storage
+from redis import RedisError
+from redis.exceptions import TimeoutError
+
+
+usage = "%prog [options]"
+version = "%prog 0.0.2"
+
+NCBI_URL = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi'
+error_patterns = (
+    'Error reading from remote server',
+    'Bad gateway',
+    'Cannot process ID list',
+    'server is temporarily unable to service your request',
+    'Service unavailable',
+    'Server Error',
+    'ID list is empty',
+    'Resource temporarily unavailable',
+)
+
+
+class JobFailedError(Exception):
+    pass
+
+
+def main():
+    """Parse the command line, set up the database, start the main loop"""
+
+    default_queue = os.getenv('AS_QUEUE', "redis://localhost:6379/0")
+
+    parser = OptionParser(usage=usage, version=version)
+    parser.add_option('-q', '--queue', dest="queue",
+                      help="URI of the database containing the job queue (default: {})".format(default_queue),
+                      default=default_queue)
+    parser.add_option('-w', '--workdir', dest="workdir",
+                      help="Path to working directory that contains the uploaded sequences",
+                      default=path.abspath("upload"))
+    parser.add_option('-c', '--cpus', dest="cpus", type="int",
+                      help="Number of cpus to use", default=1)
+    parser.add_option('-n', '--name', dest="name",
+                      help="Name of this dispatcher process", default="runSMASH")
+    parser.add_option('-s', '--statusdir', dest="statusdir",
+                      default="/tmp/antismash_status",
+                      help="Directory to keep job status files in")
+    parser.add_option('-t', '--timeout', dest="timeout",
+                      default=86400, type="int",
+                      help="Kill jobs after a certain number of seconds (default: 86400 (1 day))")
+    parser.add_option('--once', dest="once",
+                      default=False, action="store_true",
+                      help="Only run the dispatcher once")
+    parser.add_option('--script', dest="script",
+                      default="run_antismash.py",
+                      help="antiSMASH run script")
+    parser.add_option('--legacy-script', dest="legacy_script",
+                      default="run_legacy_antismash",
+                      help="antiSMASH run script for version 3 jobs")
+    parser.add_option('-d', '--debug', dest="debug",
+                      action="store_true", default=False,
+                      help="Run script in debug mode")
+    parser.add_option('--minimal', dest="minimal",
+                      action="store_true", default=False,
+                      help="Only run minimal antiSMASH analysis")
+    parser.add_option('--container', dest="container",
+                      action="store_true",
+                      help="Run script is running a container, use in-container paths")
+    parser.add_option('--direct', dest="container",
+                      action="store_false",
+                      help="Run script is not running a container, use real paths")
+    parser.set_default("container", True)
+    (options, args) = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
+
+    redis_store = get_storage(options.queue, timeout=7)
+    options.redis_store = redis_store
+    options.num_retries = 0
+
+    if not path.isdir(options.statusdir):
+        os.mkdir(options.statusdir)
+    try:
+        options.r_name = 'control:%s' % options.name
+        res = redis_store.hgetall(options.r_name)
+        if res == {}:
+            control = Control(options.name)
+        else:
+            control = Control(**res)
+        control.running = True
+        control.status = "idle"
+        redis_store.hmset(options.r_name, control.__dict__)
+        run(options)
+    except Exception as err:
+        logging.error("caught exception: %s (%s)", err, type(err))
+        raise
+    finally:
+        redis_store.delete(options.r_name)
+
+
+def run(options):
+    """Run the dispatcher process"""
+    redis_store = options.redis_store
+    while True:
+        try:
+            control = Control(**redis_store.hgetall(options.r_name))
+            if control.stop_scheduled == 'True':
+                logging.info("Stop is scheduled, will now stop")
+                control.stop_scheduled = False
+                redis_store.hset(options.r_name, 'stop_scheduled', control.stop_scheduled)
+                return
+
+            uid = redis_store.brpoplpush('jobs:queued', '%s:queued' % options.name, 5)
+
+            if uid is None:
+                time.sleep(5)
+                continue
+
+            res = redis_store.hgetall(u'job:%s' % uid)
+            if res == {}:
+                continue
+            job = Job(**res)
+            job.dispatcher = options.name
+            redis_store.hset(u'job:%s' % job.uid, 'status', 'queued: %s' % job.dispatcher)
+            redis_store.hset(u'job:%s' % job.uid, 'dispatcher', job.dispatcher)
+            redis_store.hset(options.r_name, 'status', "running job %s" % job.uid)
+            dispatch(job, options)
+            redis_store.hset(options.r_name, 'status', 'idle')
+            if options.once:
+                break
+        except TimeoutError as err:
+            logging.error(err)
+            if options.once:
+                break
+            if options.num_retries < 5:
+                options.num_retries += 1
+                time.sleep(5)
+                continue
+            logging.error('Maximum retries exceeded, shutting down')
+            raise
+        except RedisError as err:
+            logging.debug("Error communicating with redis: %r", err.message)
+            raise
+        except Exception as err:
+            logging.error("something bad happened: %s, %s", err, type(err))
+            raise
+        except KeyboardInterrupt:
+            logging.error("KeyboardInterrupt caught, exiting.")
+            redis_store.hset(options.r_name, 'status', 'shut down')
+            redis_store.hset(options.r_name, 'running', 'False')
+            sys.exit(1)
+
+
+def dispatch(job, options):
+    """Dispatch a specified job"""
+    now = datetime.utcnow()
+    logging.info("%s: Dispatching %s", options.name, job)
+    redis_store = options.redis_store
+    job_id = u'job:%s' % job.uid
+    redis_store.rpoplpush('%s:queued' % options.name, 'jobs:running')
+    redis_store.hset(job_id, 'last_changed', now)
+    redis_store.hset(job_id, 'status', "running")
+    try:
+        if job.download != '':
+            download_from_ncbi(job, options)
+            redis_store.hset(job_id, 'filename', job.filename)
+        run_command(job, options)
+        job.status = 'done'
+    except JobFailedError as err:
+        msg, rcode = err[0]
+        job.status = "failed: %s" % msg
+        logging.info("%s: Failed: %s", options.name, msg[-400:])
+        if rcode != 2 or (job.jobtype != "antismash" and job.jobtype != "test1"):
+            try:
+                send_error_mail(job)
+            except Exception as err:
+                logging.error("Sending error mail failed: %s, %s", err, type(err))
+    job.last_changed = datetime.utcnow()
+    redis_store.hset(job_id, 'status', job.status)
+    redis_store.hset(job_id, 'last_changed', job.last_changed)
+    redis_store.lrem('jobs:running', job.uid)
+    redis_store.lpush('jobs:completed', job.uid)
+    timestamps = (
+        job.last_changed.strftime("%Y-%m-%d"),  # daily stats
+        job.last_changed.strftime("%Y-CW%U"),   # weekly stats
+        job.last_changed.strftime("%Y-%m"),     # monthly stats
+    )
+    for timestamp in timestamps:
+        redis_store.hset('jobs:{timestamp}'.format(timestamp=timestamp), job.uid, job.status.split(":")[0])
+    try:
+        send_mail(job)
+    except Exception as err:
+        logging.error("Sending error mail failed: %s, %s", err, type(err))
+    delete_statusfile(job, options)
+    logging.info("%s: Done with %s", options.name, job)
+
+
+def run_command(job, options):
+    """actually run the command"""
+    args, cwd = get_commandline_for_job(job, options)
+    proc = sp.Popen(args, cwd=cwd, stderr=sp.PIPE)
+    try:
+        timeout = options.timeout
+        if options.container:
+            timeout = None
+        stdout_data, stderr_data = proc.communicate(timeout=timeout)
+    except sp.TimeoutExpired:
+        kill_proc_and_all_children(proc)
+        raise JobFailedError(("Runtime exceeded limit of {} seconds".format(options.timeout), 9))
+
+    if proc.returncode > 0:
+        raise JobFailedError((str(stderr_data), proc.returncode))
+
+
+def get_commandline_for_job(job, options):
+    cwd = path.join(options.workdir, job.uid)
+
+    if job.jobtype == 'antismash4':
+        return get_antismash4_commandline(job, options), cwd
+    elif job.jobtype == 'antismash3':
+        return get_antismash3_commandline(job, options), cwd
+    elif job.jobtype == 'plantismash':
+        return get_plantismash_commandline(job, options), cwd
+    else:
+        raise JobFailedError(("Don't know how to run %r jobs" % job.jobtype, -1))
+
+
+def get_antismash3_commandline(job, options):
+    """Get commandline for antismash3 command"""
+    args = [
+        options.legacy_script,
+        job.filename,
+        options.workdir,
+        '--cpus', str(options.cpus)
+    ]
+
+    if options.debug:
+        args.append('--debug')
+    else:
+        args.append('--verbose')
+
+    if job.smcogs:
+        args.append('--smcogs')
+    if job.asf:
+        args.append('--asf')
+
+
+    if job.clusterblast:
+        args.append('--clusterblast')
+    if job.subclusterblast:
+        args.append('--subclusterblast')
+    if job.knownclusterblast:
+        args.append('--knownclusterblast')
+
+    if job.fullhmmer:
+        args.append('--full-hmmer')
+
+    if job.from_pos > 0:
+        args += ['--from', str(job.from_pos)]
+    if job.to_pos > 0:
+        args += ['--to', str(job.to_pos)]
+
+    if job.all_orfs:
+        args.append('--all-orfs')
+
+    if job.inclusive:
+        args.append('--inclusive')
+        args += [
+            '--cf_cdsnr', str(job.cf_cdsnr),
+            '--cf_npfams', str(job.cf_npfams),
+            '--cf_threshold', str(job.cf_threshold)
+        ]
+
+    if job.genefinder != '':
+        args += ['--genefinding', job.genefinder.replace('_', '-')]
+
+    args += ['--input-type', job.molecule]
+    args += ['--statusfile', path.join(options.statusdir, job.uid)]
+    args += ['--logfile', path.join(path.join(options.workdir, job.uid), "%s.log" % job.uid)]
+
+    output_dir = path.abspath(path.join(options.workdir, job.uid))
+    args += ['--outputfolder', output_dir]
+
+    return args
+
+
+def get_antismash4_commandline(job, options):
+    """Get commandline for antismash4 command"""
+    args = [
+        options.script,
+        job.filename,
+        '--cpus', str(options.cpus),
+        '--taxon', job.taxon,
+        '--limit', '1000',
+    ]
+
+    if options.container:
+        args.insert(2, options.workdir)
+
+    if options.minimal:
+        args.append('--minimal')
+
+    if options.debug:
+        args.append('--debug')
+    else:
+        args.append('--verbose')
+
+    if job.smcogs:
+        args.append('--smcogs')
+    if job.asf:
+        args.append('--asf')
+    if job.tta:
+        args.append('--tta')
+    if job.cassis:
+        args.append('--cassis')
+    if job.transatpks_da:
+        args.append('--transatpks_da')
+
+    if job.clusterblast:
+        args.append('--clusterblast')
+    if job.subclusterblast:
+        args.append('--subclusterblast')
+    if job.knownclusterblast:
+        args.append('--knownclusterblast')
+
+    if job.fullhmmer:
+        args.append('--full-hmmer')
+
+    if job.from_pos > 0:
+        args += ['--from', str(job.from_pos)]
+    if job.to_pos > 0:
+        args += ['--to', str(job.to_pos)]
+
+    if job.all_orfs:
+        args.append('--all-orfs')
+
+    if job.inclusive:
+        args.append('--inclusive')
+        args += [
+            '--cf_cdsnr', str(job.cf_cdsnr),
+            '--cf_npfams', str(job.cf_npfams),
+            '--cf_threshold', str(job.cf_threshold)
+        ]
+
+    if job.borderpredict:
+        args.append('--borderpredict')
+
+    if job.gff3:
+        if options.container:
+            file_path = path.join("/input", job.gff3)
+        else:
+            file_path = path.join(options.workdir, job.uid, job.gff3)
+        args += ['--gff3', file_path]
+
+    if job.genefinder != '':
+        args += ['--genefinding', job.genefinder.replace('_', '-')]
+
+    args += ['--input-type', job.molecule]
+    args += ['--statusfile', path.join(options.statusdir, job.uid)]
+    args += ['--logfile', path.join(path.join(options.workdir, job.uid), "%s.log" % job.uid)]
+
+    output_dir = path.abspath(path.join(options.workdir, job.uid))
+    args += ['--outputfolder', output_dir]
+
+    return args
+
+
+def get_plantismash_commandline(job, options):
+    """Get commandline for the plantismash command"""
+    cpus = str(options.cpus)
+    output_dir = path.abspath(path.join(options.workdir, job.uid))
+
+    args = [
+        options.script,
+        job.filename,
+        '--cpus', cpus,
+        '--statusfile', path.join(options.statusdir, job.uid),
+        '--logfile', path.join(output_dir, "%s.log" % job.uid),
+        '--outputfolder', output_dir,
+        '--taxon', 'plants',
+    ]
+
+    if options.debug:
+        args.append('--debug')
+    else:
+        args.append('--verbose')
+
+
+    if job.clusterblast == "True":
+        args.append('--clusterblast')
+
+    if job.knownclusterblast == "True":
+        args.append('--knownclusterblast')
+
+    if job.coexpress:
+        args.append('--coexpress')
+        if job.min_mad:
+            args += ['--coexpress_min_MAD', job.min_mad]
+        if job.soft_file:
+            args += ['--coexpress-soft_file', job.soft_file]
+        if job.csv_file:
+            args += ['--coexpress-csv_file', job.csv_file]
+
+    if job.cdh_cutoff:
+        args += ['--cdh-cutoff', job.cdh_cutoff]
+
+    if job.min_domain_number:
+        args += ['--min-domain-number', job.min_domain_number]
+
+    if job.gff3:
+        args += ['--gff3', job.gff3]
+
+    return args
+
+
+def delete_statusfile(job, options):
+    if path.isfile(path.join(options.statusdir, job.uid)):
+        os.remove(path.join(options.statusdir, job.uid))
+
+
+def download_from_ncbi(job, options):
+    params = dict(tool='antiSMASH', retmode='text')
+
+    # delete / characters and as NCBI ignores IDs after #, do the same.
+    params['id'] = job.download.replace('/', '').split('#', 1)[0]
+
+    if job.molecule == 'nucl':
+        params['db'] = 'nucleotide'
+        params['rettype'] = 'gbwithparts'
+        file_ending = ".gbk"
+    else:
+        params['db'] = 'protein'
+        params['rettype'] = 'fasta'
+        file_ending = ".fa"
+
+    if job.email != '':
+        params['email'] = '"{}"'.format(job.email)
+
+    job_id = u'job:%s' % job.uid
+    options.redis_store.hset(job_id, 'status', 'running: Downloading the input file from NCBI')
+
+    try:
+        r = requests.get(NCBI_URL, params=params, stream=True)
+    except (requests.exceptions.RequestException, IncompleteRead) as e:
+        raise JobFailedError((str(e), -1))
+
+    if r.status_code != requests.codes.ok:
+        raise JobFailedError(("Failed to download file with id {} from NCBI".format(params['id']),
+                              r.status_code))
+
+    safe_ids = params['id'][:20].replace(' ', '_')
+    outfile_name = path.join(options.workdir, job.uid,
+                             "{ncbi_id}{ending}".format(ncbi_id=safe_ids, ending=file_ending))
+
+    with open(outfile_name, 'wb') as fh:
+        first = True
+        # use a chunk size of 4k, as that's what most filesystems use these days
+        for chunk in r.iter_content(4096):
+            if first:
+                first = False
+                for pattern in error_patterns:
+                    if pattern in chunk:
+                        raise JobFailedError(("Failed to download file with id {} from NCBI: {}".format(
+                            params['id'], pattern), 1))
+
+            fh.write(chunk)
+
+    job.filename = path.basename(outfile_name)
+
+
+def kill_proc_and_all_children(proc):
+    """Kill a process and all child processes spawned by that process"""
+    p = sp.Popen(['ps', '--no-headers', '-o', 'pid', '--ppid', str(proc.pid)],
+                 stdout=sp.PIPE, stderr=sp.PIPE)
+    stdout, stderr = p.communicate()
+    proc.terminate()
+    try:
+        proc.communicate(timeout=5)
+    except sp.TimeoutExpired:
+        pass
+    pids = [int(strpid) for strpid in stdout.split()]
+    for pid in pids:
+        try:
+            os.kill(pid, SIGKILL)
+        except OSError:
+            pass
+
+
+if __name__ == "__main__":
+    main()

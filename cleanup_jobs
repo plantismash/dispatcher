@@ -1,0 +1,140 @@
+#!/usr/bin/env python
+#
+# This file is part of antiSMASH.
+#
+# antiSMASH is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# antiSMASH is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with antiSMASH.  If not, see <http://www.gnu.org/licenses/>.
+"""Get new pending jobs from the job queue and dispatch them
+
+For now, only use a single dispatcher process and a SQLite DB
+"""
+from __future__ import print_function
+
+import glob
+from optparse import OptionParser
+from datetime import datetime, timedelta
+from shutil import rmtree
+import os
+from os import path
+
+from dispatcher.models import Job
+from dispatcher.storage import get_storage
+
+usage = "%prog [options]"
+version = "%prog 0.0.2"
+
+
+def main():
+    """Parse the command line, connect to the database, delete old entries"""
+    default_queue = os.getenv('AS_QUEUE', "redis://localhost:6379/0")
+    parser = OptionParser(usage=usage, version=version)
+    parser.add_option('-q', '--queue', dest="queue",
+                      help="URI of the database containing the job queue (default: {})".format(default_queue),
+                      default=default_queue)
+    parser.add_option('-w', '--workdir', dest="workdir",
+                      help="Path to working directory that contains the uploaded sequences",
+                      default="upload")
+    parser.add_option('--from-db', dest="from_db",
+                      action="store_true", default=True,
+                      help="Use the information from the jobs:completed list in Redis")
+    parser.add_option('--from-directory', dest="from_db",
+                      action="store_false",
+                      help="Crawl the workdir and do a database lookup based on that")
+    parser.add_option('-n', '--dry-run', dest="dry_run",
+                      action="store_true", default=False,
+                      help="Dry run only, don't change any files or DB entries")
+    (options, args) = parser.parse_args()
+
+    redis_store = get_storage(options.queue)
+    run(options, redis_store)
+
+
+def run(options, redis_store):
+    """Run the cleanup process"""
+    if options.from_db:
+        from_db(options, redis_store)
+    else:
+        from_dir(options, redis_store)
+
+
+def from_db(options, redis_store):
+    """Run the cleanup based on info from the database"""
+    jobs = redis_store.lrange('jobs:completed', 0, -1)[::-1]
+    for job_id in jobs:
+        job = Job(**redis_store.hgetall(u'job:{}'.format(job_id)))
+
+        if should_remove_job(job):
+            remove_job(options, redis_store, job)
+            continue
+
+        if job.get_short_status() == 'removed':
+            dirname = path.join(options.workdir, job.uid)
+            remove_stale_dir(options, dirname)
+
+
+def from_dir(options, redis_store):
+    """Run the cleanup by crawling the work dir and doing database lookups based on that"""
+    dirs_to_check = glob.glob(path.join(options.workdir, '*-*-*'))
+    for dirname in dirs_to_check:
+        dir_id = path.basename(dirname)
+        job_key = u'job:{}'.format(dir_id)
+        if not redis_store.exists(job_key):
+            print("Can't find job {}, removing stale dir".format(dir_id))
+            remove_stale_dir(options, dirname)
+            continue
+        job = Job(**redis_store.hgetall(job_key))
+        if should_remove_job(job):
+            remove_job(options, redis_store, job)
+            continue
+        print("Not removing job ", job.uid)
+
+
+def should_remove_job(job):
+    """check if jobs should be removed"""
+    one_month = timedelta(weeks=4)
+    one_week = timedelta(weeks=1)
+    now = datetime.utcnow()
+
+    status = job.get_short_status()
+
+    if status in ('running', 'pending'):
+        return False
+    if status == 'done':
+        if now - job.last_changed < one_month:
+            return False
+        return True
+    if status == 'failed':
+        if now - job.last_changed < one_week:
+            return False
+        return True
+
+    return False
+
+
+def remove_job(options, redis_store, job):
+    """Remove a job's working directory and set the job status to removed"""
+    print("Removing job {} ending with status {!r} on {}".format(job.uid, job.get_short_status(), job.last_changed))
+    if not options.dry_run:
+        rmtree(path.join(options.workdir, job.uid), ignore_errors=True)
+        redis_store.hset(u'job:{}'.format(job.uid), 'status', 'removed: {}'.format(job.status))
+
+
+def remove_stale_dir(options, dirname):
+    """Remove a stale job directory"""
+    if path.exists(dirname):
+        print("Removing stale directory for job {}".format(dirname))
+        if not options.dry_run:
+            rmtree(dirname)
+
+if __name__ == "__main__":
+    main()
