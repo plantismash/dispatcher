@@ -19,14 +19,14 @@ from datetime import datetime, timedelta
 def get_bool(obj, param, default=False):
     '''convert Redis' string serialised boolean values back to true booleans'''
     val = obj.get(param, default)
-    if isinstance(val, basestring):
+    if isinstance(val, str):
         val = (val.lower() == 'true')
     return val
 
 
 def _generate_jobid(taxon):
     """Generate a job uid based on the taxon"""
-    return u"{}-{}".format(taxon, uuid.uuid4())
+    return "{}-{}".format(taxon, uuid.uuid4())
 
 
 class Job(object):
@@ -37,12 +37,12 @@ class Job(object):
         self.email = kwargs.get('email', '')
         self.filename = kwargs.get('filename', '')
         added = kwargs.get('added', datetime.utcnow())
-        if isinstance(added, (str, unicode)):
+        if isinstance(added, str):
             self.added = datetime.strptime(added, "%Y-%m-%d %H:%M:%S.%f")
         else:
             self.added = added
         last_changed = kwargs.get('last_changed', self.added)
-        if isinstance(last_changed, (str, unicode)):
+        if isinstance(last_changed, str):
             self.last_changed = datetime.strptime(last_changed, "%Y-%m-%d %H:%M:%S.%f")
         else:
             self.last_changed = last_changed
@@ -100,10 +100,10 @@ class Notice(object):
                  added=None,
                  show_from=None,
                  show_until=None,
-                 category=u'notice',
+                 category='notice',
                  id=None
                 ):
-        self.id = id if id is not None else unicode(uuid.uuid4())
+        self.id = id if id is not None else str(uuid.uuid4())
         self.added = added and added or datetime.utcnow()
         self.show_from = show_from and show_from or datetime.utcnow()
         self.show_until = show_until and show_until or \
@@ -119,10 +119,10 @@ class Notice(object):
     def json(self):
         # first get rid of all internal attributes
         d = self.__dict__
-        ret = dict((key, d[key]) for key in d.keys() if not key.startswith('_'))
+        ret = dict((key, d[key]) for key in list(d.keys()) if not key.startswith('_'))
 
         # replace datetime objects by a timestring
-        for key in ret.keys():
+        for key in list(ret.keys()):
             if hasattr(ret[key], 'strftime'):
                 ret[key] = ret[key].strftime('%Y-%m-%d %H:%M:%S')
 

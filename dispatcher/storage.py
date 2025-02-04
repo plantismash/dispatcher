@@ -1,7 +1,7 @@
 # This file is part of antiSMASH and distributed under the same license
 '''Unify storage access for all scripts'''
 
-from urlparse import urlparse
+from urllib.parse import urlparse
 import redis
 from redis.sentinel import Sentinel
 

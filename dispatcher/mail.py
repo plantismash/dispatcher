@@ -71,7 +71,7 @@ def send_mail(job):
     try:
         handle_send(FROMADDR, job.email, msg)
     except Exception as e:
-        print "Failed to send mail: %s" % e
+        print("Failed to send mail: %s" % e)
 
 
 def compose_message(job):
@@ -123,7 +123,7 @@ def send_error_mail(job):
     try:
         handle_send(FROMADDR, ERRORADDR, msg)
     except Exception as e:
-        print "Failed to send error mail: %s" % e
+        print("Failed to send error mail: %s" % e)
 
 
 def handle_send(from_addr, to_addr, message):

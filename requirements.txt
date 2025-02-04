@@ -1,5 +1,4 @@
-pyinotify
+pyinotify # watchdog is the MacOS equivalent
 redis
 hiredis
 requests
-subprocess32
