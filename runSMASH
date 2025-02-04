@@ -416,10 +416,10 @@ def get_plantismash_commandline(job, options):
         args.append('--verbose')
 
 
-    if job.clusterblast == "True":
+    if job.clusterblast == True:
         args.append('--clusterblast')
 
-    if job.knownclusterblast == "True":
+    if job.knownclusterblast == True:
         args.append('--knownclusterblast')
 
     if job.coexpress:
