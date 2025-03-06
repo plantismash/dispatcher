@@ -16,6 +16,7 @@
 import os
 import smtplib
 from datetime import datetime
+import telnetlib
 
 FROMADDR = os.getenv('ANTISMASH_EMAIL_FROM', "antismash@localhost")
 ERRORADDR = os.getenv('ANTISMASH_EMAIL_ERROR', FROMADDR)
@@ -25,6 +26,8 @@ SMTP_USERNAME = os.getenv('ANTISMASH_EMAIL_USER', '')
 SMTP_PASSWORD = os.getenv('ANTISMASH_EMAIL_PASSWORD', '')
 BASE_URL = os.getenv('ANTISMASH_BASE_URL', 'http://antismash.secondarymetabolites.org')
 TOOL_NAME = os.getenv('ANTISMASH_TOOL_NAME', 'antiSMASH')
+TELNET_MAIL_SERVER = os.getenv('TELNET_MAIL_SERVER', 'localhost')
+TELNET_MAIL_DOMAIN = os.getenv('TELNET_MAIL_DOMAIN', 'localhost')
 
 message_template = """From: %(from)s
 To: %(to)s
@@ -69,7 +72,8 @@ def send_mail(job):
         return
     msg = compose_message(job)
     try:
-        handle_send(FROMADDR, job.email, msg)
+        # handle_send(FROMADDR, job.email, msg)
+        handle_send_telnet(FROMADDR, job.email, msg)
     except Exception as e:
         print "Failed to send mail: %s" % e
 
@@ -121,7 +125,8 @@ def send_error_mail(job):
 
     msg = error_message_template % blocks
     try:
-        handle_send(FROMADDR, ERRORADDR, msg)
+        # handle_send(FROMADDR, ERRORADDR, msg)
+        handle_send_telnet(FROMADDR, ERRORADDR, msg)
     except Exception as e:
         print "Failed to send error mail: %s" % e
 
@@ -143,3 +148,48 @@ def handle_send(from_addr, to_addr, message):
         raise Exception('Invalid email configuration')
     server.sendmail(from_addr, [to_addr], message)
     server.quit()
+
+def handle_send_telnet(mail_from, mail_to, message):
+    t = telnetlib.Telnet(host=TELNET_MAIL_SERVER, port=25)
+    try:
+        print "connected"
+
+        t.write(b"EHLO + " bytes(TELNET_MAIL_DOMAIN, "UTF8") + b"\n")
+        print "wrote helo"
+        res = t.read_until(b"250 CHUNKING\r\n")
+        print res
+        # while True:
+        #     if res == b"250 CHUNKING\r\n":
+        #         break
+
+        t.write(b"MAIL FROM:" + bytes(mail_from, "UTF8") + b"\n")
+        print "wrote from"
+        print t.read_until(b"\n")
+
+        t.write(b"RCPT TO:" + bytes(mail_to, "UTF8") + b"\n")
+        print "wrote rcpt"
+        print t.read_until(b"\n")
+
+        t.write(b"DATA\n")
+        print "start data"
+        print t.read_until(b"\n")
+
+        # t.write(b"Subject: " + bytes(mail_subject, "UTF8") + b"\r\n")
+        # print "wrote"
+        # t.write(b"From: " + bytes(mail_from, "UTF8") + b"\r\n")
+        # print "wrote"
+        # t.write(b"To: " + bytes(mail_to, "UTF8") + b"\r\n")
+        print "wrote"
+        t.write(b"\r\n")
+        print "wrote"
+        t.write(bytes(message, "UTF8") +  b"\r\n")
+        print "wrote"
+        t.write(b"\r\n.\r\n")
+        print "wrote"
+    except Exception as e:
+        print e
+    finally:
+        t.write(b"QUIT\n")
+        print t.read_until(b"\n")
+        print "disconnected telnet"
+        t.close()
