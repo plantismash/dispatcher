@@ -22,18 +22,18 @@ import os
 import sys
 from os import path
 import logging
-import subprocess32 as sp
 import requests
 import time
 from signal import SIGKILL
 from optparse import OptionParser
 from datetime import datetime
-from httplib import IncompleteRead
+from http.client import IncompleteRead
 from dispatcher.models import Job, Control
 from dispatcher.mail import send_mail, send_error_mail
 from dispatcher.storage import get_storage
 from redis import RedisError
 from redis.exceptions import TimeoutError
+import subprocess as sp
 
 
 usage = "%prog [options]"
@@ -119,7 +119,9 @@ def main():
             control = Control(**res)
         control.running = True
         control.status = "idle"
-        redis_store.hmset(options.r_name, control.__dict__)
+        for key, value in control.__dict__.items():
+            # convert value to string, as redis only stores strings
+            redis_store.hset(options.r_name, str(key), str(value))
         run(options)
     except Exception as err:
         logging.error("caught exception: %s (%s)", err, type(err))
@@ -133,7 +135,11 @@ def run(options):
     redis_store = options.redis_store
     while True:
         try:
-            control = Control(**redis_store.hgetall(options.r_name))
+            rd_store = redis_store.hgetall(options.r_name)
+            rd_dictionary = {} 
+            for key, value in rd_store.items():
+                rd_dictionary[key.decode()] = value.decode()
+            control = Control(**rd_dictionary)
             if control.stop_scheduled == 'True':
                 logging.info("Stop is scheduled, will now stop")
                 control.stop_scheduled = False
