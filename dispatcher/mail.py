@@ -154,8 +154,8 @@ def handle_send_telnet(mail_from, mail_to, message):
     try:
         print "connected"
 
-        t.write(b"EHLO + " bytes(TELNET_MAIL_DOMAIN, "UTF8") + b"\n")
-        print "wrote helo"
+        t.write(b"EHLO " + bytes(TELNET_MAIL_DOMAIN, "UTF8") + b"\n")
+        print "wrote ehlo"
         res = t.read_until(b"250 CHUNKING\r\n")
         print res
         # while True:
