@@ -154,7 +154,7 @@ def handle_send_telnet(mail_from, mail_to, message):
     try:
         print "connected"
 
-        t.write(b"EHLO " + bytes(TELNET_MAIL_DOMAIN, "UTF8") + b"\n")
+        t.write(b"EHLO " + bytes(TELNET_MAIL_DOMAIN) + b"\n")
         print "wrote ehlo"
         res = t.read_until(b"250 CHUNKING\r\n")
         print res
@@ -162,11 +162,11 @@ def handle_send_telnet(mail_from, mail_to, message):
         #     if res == b"250 CHUNKING\r\n":
         #         break
 
-        t.write(b"MAIL FROM:" + bytes(mail_from, "UTF8") + b"\n")
+        t.write(b"MAIL FROM:" + bytes(mail_from) + b"\n")
         print "wrote from"
         print t.read_until(b"\n")
 
-        t.write(b"RCPT TO:" + bytes(mail_to, "UTF8") + b"\n")
+        t.write(b"RCPT TO:" + bytes(mail_to) + b"\n")
         print "wrote rcpt"
         print t.read_until(b"\n")
 
@@ -182,7 +182,7 @@ def handle_send_telnet(mail_from, mail_to, message):
         print "wrote"
         t.write(b"\r\n")
         print "wrote"
-        t.write(bytes(message, "UTF8") +  b"\r\n")
+        t.write(bytes(message) +  b"\r\n")
         print "wrote"
         t.write(b"\r\n.\r\n")
         print "wrote"
