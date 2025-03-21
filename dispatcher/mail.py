@@ -179,9 +179,9 @@ def handle_send_telnet(mail_from, mail_to, message):
         # t.write(b"From: " + bytes(mail_from, "UTF8") + b"\r\n")
         # print "wrote"
         # t.write(b"To: " + bytes(mail_to, "UTF8") + b"\r\n")
-        print "wrote"
-        t.write(b"\r\n")
-        print "wrote"
+        # print "wrote"
+        # t.write(b"\r\n")
+        # print "wrote"
         t.write(bytes(message) +  b"\r\n")
         print "wrote"
         t.write(b"\r\n.\r\n")
