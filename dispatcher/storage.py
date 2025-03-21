@@ -25,7 +25,7 @@ def get_storage(queue, timeout=0.1):
         else:
             host = parsed_url.netloc
         sentinel = Sentinel([(host, port)], socket_timeout=timeout)
-        redis_store = sentinel.master_for(service, redis_class=redis.Redis, socket_timeout=timeout)
+        redis_store = sentinel.master_for(service, redis_class=redis.Redis, socket_timeout=timeout, decode_responses=True)
     else:
         raise AntismashStorageError('Unknown storage scheme {!r}'.format(queue))
 
