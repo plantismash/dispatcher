@@ -145,38 +145,51 @@ def main():
 def run(options):
     """Run the dispatcher process"""
     redis_store = options.redis_store
+    queue_name = 'jobs:queued'
 
     while True:
         try:
-            # ✅ Fetch control data
+            # Fetch control data
             rd_store = redis_store.hgetall(options.r_name)
-            rd_store = {k.decode() if isinstance(k, bytes) else k: (v.decode() if isinstance(v, bytes) else v) for k, v in rd_store.items()}
+            rd_store = {k.decode() if isinstance(k, bytes) else k: 
+                        (v.decode() if isinstance(v, bytes) else v) 
+                        for k, v in rd_store.items()}
 
             control = Control(**rd_store)
+
             if control.stop_scheduled == 'True':
                 logging.info("Stopping dispatcher...")
                 control.stop_scheduled = False
                 redis_store.hset(options.r_name, 'stop_scheduled', control.stop_scheduled)
                 return
 
-            print("🔍 Checking for jobs in queue...")
-            uid = redis_store.brpoplpush('jobs:queued', f'{options.name}:queued', 5)
+            # Check current queue state BEFORE popping
+            jobs = redis_store.lrange(queue_name, 0, -1)
+            decoded_jobs = [j.decode() if isinstance(j, bytes) else j for j in jobs]
+            logging.info("Queue length: %d", len(decoded_jobs))
+            logging.info("Jobs in queue: %s", ", ".join(decoded_jobs) if decoded_jobs else "None")
+
+            # Now try to pop a job (this will block up to 5 seconds)
+            uid = redis_store.brpoplpush(queue_name, f'{options.name}:queued', 5)
 
             if uid is None:
-                print("No jobs in queue")
+                logging.info("No job picked up in this cycle.")
                 time.sleep(5)
                 continue
 
             uid = uid.decode() if isinstance(uid, bytes) else uid
-            print(f"📥 Processing job: {uid}")
+            logging.info("Picked up job: %s → moved to '%s:queued'", uid, options.name)
 
+            # Fetch job data
             res = redis_store.hgetall(f'job:{uid}')
-            res = {k.decode() if isinstance(k, bytes) else k: (v.decode() if isinstance(v, bytes) else v) for k, v in res.items()}
+            res = {k.decode() if isinstance(k, bytes) else k:
+                   v.decode() if isinstance(v, bytes) else v
+                   for k, v in res.items()}
 
             if not res:
+                logging.warning("Job data not found for UID: %s", uid)
                 continue
 
-            # ✅ Fix datetime conversion
             if 'last_changed' in res:
                 try:
                     res['last_changed'] = datetime.fromisoformat(res['last_changed']).replace(tzinfo=None)
@@ -187,8 +200,8 @@ def run(options):
             job.dispatcher = options.name
 
             dispatch(job, options)
-
             redis_store.hset(options.r_name, 'status', 'idle')
+
             if options.once:
                 break
 
@@ -204,38 +217,67 @@ def run(options):
             logging.error("Unexpected error: %s, %s", err, type(err))
             raise
 
-
-
 def dispatch(job, options):
     """Dispatch a specified job"""
-    now = datetime.now(timezone.utc)
+    now = datetime.utcnow()
+    logging.info("%s: Dispatching %s", options.name, job)
     redis_store = options.redis_store
     job_id = f'job:{job.uid}'
 
-    print(f"🚀 Dispatching job {job.uid}")
-
-    # ✅ Ensure job directory exists
-    job_dir = path.join(options.workdir, job.uid)
-    os.makedirs(job_dir, exist_ok=True)
+    # Move job from queued to running
+    redis_store.rpoplpush(f'{options.name}:queued', 'jobs:running')
+    redis_store.hset(job_id, 'last_changed', now.isoformat())
+    redis_store.hset(job_id, 'status', 'running')
 
     try:
-        redis_store.rpoplpush(f'{options.name}:queued', 'jobs:running')
-        redis_store.hset(job_id, 'last_changed', now.isoformat())
-        redis_store.hset(job_id, 'status', "running")
+        # Handle NCBI download if specified
+        if job.download:
+            download_from_ncbi(job, options)
+            redis_store.hset(job_id, 'filename', job.filename)
 
+        # Execute the job command
         run_command(job, options)
-
         job.status = 'done'
-        print(f"✅ Job {job.uid} completed successfully!")
+        logging.info("%s: Job %s completed successfully", options.name, job.uid)
 
-    except Exception as err:
-        job.status = f"failed: {err}"
-        print(f"❌ Job {job.uid} failed with error: {err}")
+    except JobFailedError as err:
+        msg, rcode = err.args[0]
+        job.status = f"failed: {msg}"
+        logging.error("%s: Job %s failed with error: %s", options.name, job.uid, msg)
 
-    finally:
-        redis_store.lrem('jobs:running', 0, job.uid)
-        redis_store.lpush('jobs:completed', job.uid)
-        print(f"🎯 Job {job.uid} moved to completed queue!")
+        # Send error mail for specific job types and error codes
+        if rcode != 2 or job.jobtype not in ("antismash", "test1"):
+            try:
+                send_error_mail(job)
+            except Exception as mail_err:
+                logging.error("Sending error mail failed: %s, %s", mail_err, type(mail_err))
+
+    # Finalize job status
+    job.last_changed = datetime.utcnow()
+    redis_store.hset(job_id, 'status', job.status)
+    redis_store.hset(job_id, 'last_changed', job.last_changed.isoformat())
+    redis_store.lrem('jobs:running', 0, job.uid)
+    redis_store.lpush('jobs:completed', job.uid)
+
+    # Update job statistics
+    timestamps = (
+        job.last_changed.strftime("%Y-%m-%d"),  # daily stats
+        job.last_changed.strftime("%Y-CW%U"),   # weekly stats
+        job.last_changed.strftime("%Y-%m"),     # monthly stats
+    )
+    for timestamp in timestamps:
+        redis_store.hset(f'jobs:{timestamp}', job.uid, job.status.split(":")[0])
+
+    # Send completion mail
+    try:
+        send_mail(job)
+    except Exception as mail_err:
+        logging.error("Sending completion mail failed: %s, %s", mail_err, type(mail_err))
+
+    # Clean up status file
+    delete_statusfile(job, options)
+    logging.info("%s: Done with %s", options.name, job)
+
 
 
 def run_command(job, options):
@@ -287,6 +329,7 @@ def get_antismash3_commandline(job, options):
     if job.asf:
         args.append('--asf')
 
+    args.append('--disable_subgroup')
 
     if job.clusterblast:
         args.append('--clusterblast')
