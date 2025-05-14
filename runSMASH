@@ -33,6 +33,7 @@ from dispatcher.storage import get_storage
 from redis import RedisError
 from redis.exceptions import TimeoutError
 import subprocess as sp
+import requests
 
 
 usage = "%prog [options]"
