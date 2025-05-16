@@ -41,14 +41,14 @@ version = "%prog 0.0.2"
 
 NCBI_URL = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi'
 error_patterns = (
-    'Error reading from remote server',
-    'Bad gateway',
-    'Cannot process ID list',
-    'server is temporarily unable to service your request',
-    'Service unavailable',
-    'Server Error',
-    'ID list is empty',
-    'Resource temporarily unavailable',
+    b'Error reading from remote server',
+    b'Bad gateway',
+    b'Cannot process ID list',
+    b'server is temporarily unable to service your request',
+    b'Service unavailable',
+    b'Server Error',
+    b'ID list is empty',
+    b'Resource temporarily unavailable',
 )
 
 
