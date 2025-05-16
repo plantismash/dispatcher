@@ -75,7 +75,7 @@ def send_mail(job):
         # handle_send(FROMADDR, job.email, msg)
         handle_send_telnet(FROMADDR, job.email, msg)
     except Exception as e:
-        print "Failed to send mail: %s" % e
+        print("Failed to send mail: %s" % e)
 
 
 def compose_message(job):
@@ -128,7 +128,7 @@ def send_error_mail(job):
         # handle_send(FROMADDR, ERRORADDR, msg)
         handle_send_telnet(FROMADDR, ERRORADDR, msg)
     except Exception as e:
-        print "Failed to send error mail: %s" % e
+        print("Failed to send error mail: %s" % e)
 
 
 def handle_send(from_addr, to_addr, message):

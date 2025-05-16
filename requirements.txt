@@ -1,5 +1,4 @@
-pyinotify
+watchdog 
 redis
 hiredis
-requests
-subprocess32
+requests 
