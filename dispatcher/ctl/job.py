@@ -154,7 +154,7 @@ def job_list(args):
 """
 
     if header is not None:
-        print header
+        print(header)
     for job_id in job_ids:
         job_ = redis_store.hgetall("job:%s" % job_id)
         if job_ is None:
@@ -164,9 +164,9 @@ def job_list(args):
         job.update(job_)
         if 'uid' not in job:
             job['uid'] = job_id
-        print template % job
+        print(template % job)
     if footer is not None:
-        print footer
+        print(footer)
 
 
 def job_submit(args):
@@ -183,7 +183,7 @@ def job_submit(args):
         shutil.copy(args.gff3, jobdir)
         job.gff3 = path.basename(args.gff3)
 
-    print "Submitting job %r (%s)" % (job.uid, job.jobtype)
+    print("Submitting job %r (%s)" % (job.uid, job.jobtype))
     redis_store.hmset("job:{}".format(job.uid), job.get_dict())
     redis_store.lpush("jobs:queued", job.uid)
 
@@ -193,21 +193,21 @@ def job_cancel(args):
     redis_store = args.redis_store
     job_id = "job:{}".format(args.uid)
     if not redis_store.exists(job_id):
-        print "No such job: {}".format(args.uid)
+        print("No such job: {}".format(args.uid))
 
     job = Job(**redis_store.hgetall(job_id))
     old_status = job.status.split(':', 1)[0]
     if not args.force and old_status not in ('pending', 'canceled'):
-        print "Cannot cancel job in status '%s'" % job.status
+        print("Cannot cancel job in status '%s'" % job.status)
         sys.exit(1)
 
     if args.delete and job.status == 'pending':
         jobdir = path.abspath(path.join(args.workdir, job.uid))
         try:
             shutil.rmtree(jobdir, False)
-            print "Deleted job %r files." % job.uid
+            print("Deleted job %r files." % job.uid)
         except OSError as err:
-            print >>sys.stdout, "Failed to delete job %r files: %s" % (job.uid, err)
+            print("Failed to delete job %r files: %s" % (job.uid, err), file=sys.stdout)
 
     job.status = "%s: %s" % (args.status, args.reason)
     redis_store.hset(job_id, 'status', job.status)
@@ -220,9 +220,9 @@ def job_cancel(args):
         try:
             send_mail(job)
         except Exception as err:
-            print "failed to send mail: %s" % err
+            print("failed to send mail: %s" % err)
 
-    print "Canceled job %r (%s)" % (job.uid, job.status)
+    print("Canceled job %r (%s)" % (job.uid, job.status))
 
 
 def job_restart(args):
@@ -230,12 +230,12 @@ def job_restart(args):
     redis_store = args.redis_store
     job_id = "job:{}".format(args.uid)
     if not redis_store.exists(job_id):
-        print "No such job: {}".format(args.uid)
+        print("No such job: {}".format(args.uid))
 
     job = Job(**redis_store.hgetall(job_id))
     old_status = job.status.split(':', 1)[0]
     if old_status not in ('running', 'canceled', 'done', 'failed', 'pending'):
-        print "Cannot restart job in status '%s'" % job.status
+        print("Cannot restart job in status '%s'" % job.status)
         sys.exit(1)
 
     job.status = "pending"
@@ -253,7 +253,7 @@ def job_restart(args):
 
     redis_store.lrem("jobs:%s" % old_status, job.uid, -1)
     redis_store.rpush(queue, job.uid)
-    print "restarted job %r" % job.uid
+    print("restarted job %r" % job.uid)
 
 
 def job_show(args):
@@ -262,11 +262,11 @@ def job_show(args):
     job_struct = redis_store.hgetall("job:{}".format(args.uid))
     job = Job(**job_struct)
     if job == {}:
-        print "No such job: {}".format(args.uid)
+        print("No such job: {}".format(args.uid))
         return
 
     if args.pretty == 'json':
-        print json.dumps(job_struct, sort_keys=True, indent=4, separators=(',', ': '))
+        print(json.dumps(job_struct, sort_keys=True, indent=4, separators=(',', ': ')))
         return
 
     if args.pretty == 'multiline':
@@ -294,4 +294,4 @@ def job_show(args):
 """
     else:
         template = "%(uid)s\t%(dispatcher)s\t%(added)s\t%(last_changed)s\t%(status)r"
-    print template % job.get_dict()
+    print(template % job.get_dict())

@@ -72,12 +72,12 @@ def notice_list(args):
     notice_ids = redis_store.keys("notice:*")
     for notice_id in notice_ids:
         notice = redis_store.hgetall(notice_id)
-        print """%(id)s
+        print("""%(id)s
         %(category)s
         %(show_from)s
         %(show_until)s
     %(teaser)s
-    %(text)s"""% notice
+    %(text)s"""% notice)
 
 
 def notice_add(args):
@@ -95,6 +95,6 @@ def notice_remove(args):
 
     for notice_id in notice_ids:
         if redis_store.exists(notice_id):
-            print "Removing notice %r" % redis_store.hget(notice_id, 'teaser')
+            print("Removing notice %r" % redis_store.hget(notice_id, 'teaser'))
             redis_store.delete(notice_id)
     return

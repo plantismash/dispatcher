@@ -1,11 +1,18 @@
-antiSMASH compute job dispatcher
+plantiSMASH compute job dispatcher
 ================================
 
-This is the job dispatcher powering http://antismash.secondarymetabolites.org/
+This is the job dispatcher powering https://plantismash.bioinformatics.nl/
 
 Installation
 ------------
 
+Create a virtual environment to run the dispatcher in isolation. 
+
+```
+conda create --name plantispatcher python=3.9
+conda activate plantispatcher
+```
+Install the required dependencies 
 ```
 pip install -r requirements.txt
 ```
@@ -48,4 +55,4 @@ License
 -------
 
 The dispatcher code is licensed under the GNU GPL version 3.
-See the `LICENSE.txt` file for details.
+See the [LICENSE.txt](LICENSE.txt) file for details.

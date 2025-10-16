@@ -1,7 +1,7 @@
 # This file is part of antiSMASH and distributed under the same license
 '''Unify storage access for all scripts'''
 
-from urlparse import urlparse
+from urllib.parse import urlparse
 import redis
 from redis.sentinel import Sentinel
 
@@ -25,7 +25,7 @@ def get_storage(queue, timeout=0.1):
         else:
             host = parsed_url.netloc
         sentinel = Sentinel([(host, port)], socket_timeout=timeout)
-        redis_store = sentinel.master_for(service, redis_class=redis.Redis, socket_timeout=timeout)
+        redis_store = sentinel.master_for(service, redis_class=redis.Redis, socket_timeout=timeout, decode_responses=True)
     else:
         raise AntismashStorageError('Unknown storage scheme {!r}'.format(queue))
 

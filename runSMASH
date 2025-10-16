@@ -22,18 +22,18 @@ import os
 import sys
 from os import path
 import logging
-import subprocess32 as sp
-import requests
 import time
 from signal import SIGKILL
-from optparse import OptionParser
-from datetime import datetime
-from httplib import IncompleteRead
+import argparse
+from datetime import datetime, timezone
+from http.client import IncompleteRead
 from dispatcher.models import Job, Control
 from dispatcher.mail import send_mail, send_error_mail
 from dispatcher.storage import get_storage
 from redis import RedisError
 from redis.exceptions import TimeoutError
+import subprocess as sp
+import requests
 
 
 usage = "%prog [options]"
@@ -41,14 +41,14 @@ version = "%prog 0.0.2"
 
 NCBI_URL = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi'
 error_patterns = (
-    'Error reading from remote server',
-    'Bad gateway',
-    'Cannot process ID list',
-    'server is temporarily unable to service your request',
-    'Service unavailable',
-    'Server Error',
-    'ID list is empty',
-    'Resource temporarily unavailable',
+    b'Error reading from remote server',
+    b'Bad gateway',
+    b'Cannot process ID list',
+    b'server is temporarily unable to service your request',
+    b'Service unavailable',
+    b'Server Error',
+    b'ID list is empty',
+    b'Resource temporarily unavailable',
 )
 
 
@@ -61,68 +61,83 @@ def main():
 
     default_queue = os.getenv('AS_QUEUE', "redis://localhost:6379/0")
 
-    parser = OptionParser(usage=usage, version=version)
-    parser.add_option('-q', '--queue', dest="queue",
-                      help="URI of the database containing the job queue (default: {})".format(default_queue),
-                      default=default_queue)
-    parser.add_option('-w', '--workdir', dest="workdir",
-                      help="Path to working directory that contains the uploaded sequences",
-                      default=path.abspath("upload"))
-    parser.add_option('-c', '--cpus', dest="cpus", type="int",
-                      help="Number of cpus to use", default=1)
-    parser.add_option('-n', '--name', dest="name",
-                      help="Name of this dispatcher process", default="runSMASH")
-    parser.add_option('-s', '--statusdir', dest="statusdir",
-                      default="/tmp/antismash_status",
-                      help="Directory to keep job status files in")
-    parser.add_option('-t', '--timeout', dest="timeout",
-                      default=86400, type="int",
-                      help="Kill jobs after a certain number of seconds (default: 86400 (1 day))")
-    parser.add_option('--once', dest="once",
-                      default=False, action="store_true",
-                      help="Only run the dispatcher once")
-    parser.add_option('--script', dest="script",
-                      default="run_antismash.py",
-                      help="antiSMASH run script")
-    parser.add_option('--legacy-script', dest="legacy_script",
-                      default="run_legacy_antismash",
-                      help="antiSMASH run script for version 3 jobs")
-    parser.add_option('-d', '--debug', dest="debug",
-                      action="store_true", default=False,
-                      help="Run script in debug mode")
-    parser.add_option('--minimal', dest="minimal",
-                      action="store_true", default=False,
-                      help="Only run minimal antiSMASH analysis")
-    parser.add_option('--container', dest="container",
-                      action="store_true",
-                      help="Run script is running a container, use in-container paths")
-    parser.add_option('--direct', dest="container",
-                      action="store_false",
-                      help="Run script is not running a container, use real paths")
-    parser.set_default("container", True)
-    (options, args) = parser.parse_args()
+    parser = argparse.ArgumentParser(description="Dispatcher for antiSMASH job queue")
+    parser.add_argument('-q', '--queue', dest="queue",
+                        help=f"URI of the database containing the job queue (default: {default_queue})",
+                        default=default_queue)
+    parser.add_argument('-w', '--workdir', dest="workdir",
+                        help="Path to working directory that contains the uploaded sequences",
+                        default=path.abspath("upload"))
+    parser.add_argument('-c', '--cpus', dest="cpus", type=int,
+                        help="Number of CPUs to use", default=1)    
+    parser.add_argument('-n', '--name', dest="name",
+                        help="Name of this dispatcher process", default="runSMASH")
+    parser.add_argument('-s', '--statusdir', dest="statusdir",
+                        default="/tmp/antismash_status",
+                        help="Directory to keep job status files in")
+    parser.add_argument('-t', '--timeout', dest="timeout", type=int,
+                        default=86400,
+                        help="Kill jobs after a certain number of seconds (default: 86400 (1 day))")
+    parser.add_argument('--once', dest="once", action="store_true",
+                        help="Only run the dispatcher once")
+    parser.add_argument('--script', dest="script",
+                        default="run_antismash.py",
+                        help="Destination of the script to run plantiSMASH backend")
+    parser.add_argument('--legacy-script', dest="legacy_script",
+                        default="run_legacy_antismash",
+                        help="antiSMASH run script for version 3 jobs")
+    parser.add_argument('-d', '--debug', dest="debug", action="store_true",
+                        help="Run script in debug mode")
+    parser.add_argument('--minimal', dest="minimal", action="store_true",
+                        help="Only run minimal antiSMASH analysis")
+    parser.add_argument('--container', dest="container", action="store_true",
+                        help="Run script in a container, use in-container paths")
+    parser.add_argument('--direct', dest="container", action="store_false",
+                        help="Run script outside a container, use real paths")
 
+    parser.set_defaults(container=True)
+    options = parser.parse_args()
+
+    # Set up logging
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 
+    # Ensure workdir exists
+    if not path.exists(options.workdir):
+        print(f"📂 Creating work directory: {options.workdir}")
+        os.makedirs(options.workdir, exist_ok=True)
+
+    # Ensure statusdir exists
+    if not path.exists(options.statusdir):
+        print(f"📂 Creating status directory: {options.statusdir}")
+        os.makedirs(options.statusdir, exist_ok=True)
+
+    # Connect to Redis
     redis_store = get_storage(options.queue, timeout=7)
     options.redis_store = redis_store
     options.num_retries = 0
 
-    if not path.isdir(options.statusdir):
-        os.mkdir(options.statusdir)
     try:
-        options.r_name = 'control:%s' % options.name
+        options.r_name = f'control:{options.name}'
         res = redis_store.hgetall(options.r_name)
-        if res == {}:
-            control = Control(options.name)
-        else:
-            control = Control(**res)
+
+        # Convert Redis byte keys and values to strings
+        res = {k.decode() if k else k: v.decode() if v else v for k, v in res.items()}
+        print(f"🔍 Redis Control Data: {res}")
+
+        # Initialize control object
+        control = Control(**res) if res else Control(options.name)
         control.running = True
         control.status = "idle"
-        redis_store.hmset(options.r_name, control.__dict__)
+
+        # Store control status in Redis
+        for key, value in control.__dict__.items():
+            redis_store.hset(options.r_name, str(key), str(value))
+
+        # Run dispatcher loop
         run(options)
+
     except Exception as err:
-        logging.error("caught exception: %s (%s)", err, type(err))
+        logging.error("Caught exception: %s (%s)", err, type(err))
         raise
     finally:
         redis_store.delete(options.r_name)
@@ -131,98 +146,139 @@ def main():
 def run(options):
     """Run the dispatcher process"""
     redis_store = options.redis_store
+    queue_name = 'jobs:queued'
+
     while True:
         try:
-            control = Control(**redis_store.hgetall(options.r_name))
+            # Fetch control data
+            rd_store = redis_store.hgetall(options.r_name)
+            rd_store = {k.decode() if isinstance(k, bytes) else k: 
+                        (v.decode() if isinstance(v, bytes) else v) 
+                        for k, v in rd_store.items()}
+
+            control = Control(**rd_store)
+
             if control.stop_scheduled == 'True':
-                logging.info("Stop is scheduled, will now stop")
+                logging.info("Stopping dispatcher...")
                 control.stop_scheduled = False
                 redis_store.hset(options.r_name, 'stop_scheduled', control.stop_scheduled)
                 return
 
-            uid = redis_store.brpoplpush('jobs:queued', '%s:queued' % options.name, 5)
+            # Check current queue state BEFORE popping
+            jobs = redis_store.lrange(queue_name, 0, -1)
+            decoded_jobs = [j.decode() if isinstance(j, bytes) else j for j in jobs]
+            logging.info("Queue length: %d", len(decoded_jobs))
+            logging.info("Jobs in queue: %s", ", ".join(decoded_jobs) if decoded_jobs else "None")
+
+            # Now try to pop a job (this will block up to 5 seconds)
+            uid = redis_store.brpoplpush(queue_name, f'{options.name}:queued', 5)
 
             if uid is None:
+                logging.info("No job picked up in this cycle.")
                 time.sleep(5)
                 continue
 
-            res = redis_store.hgetall(u'job:%s' % uid)
-            if res == {}:
+            uid = uid.decode() if isinstance(uid, bytes) else uid
+            logging.info("Picked up job: %s → moved to '%s:queued'", uid, options.name)
+
+            # Fetch job data
+            res = redis_store.hgetall(f'job:{uid}')
+            res = {k.decode() if isinstance(k, bytes) else k:
+                   v.decode() if isinstance(v, bytes) else v
+                   for k, v in res.items()}
+
+            if not res:
+                logging.warning("Job data not found for UID: %s", uid)
                 continue
+
+            if 'last_changed' in res:
+                try:
+                    res['last_changed'] = datetime.fromisoformat(res['last_changed']).replace(tzinfo=None)
+                except ValueError:
+                    res['last_changed'] = datetime.now(timezone.utc)
+
             job = Job(**res)
             job.dispatcher = options.name
-            redis_store.hset(u'job:%s' % job.uid, 'status', 'queued: %s' % job.dispatcher)
-            redis_store.hset(u'job:%s' % job.uid, 'dispatcher', job.dispatcher)
-            redis_store.hset(options.r_name, 'status', "running job %s" % job.uid)
+
             dispatch(job, options)
             redis_store.hset(options.r_name, 'status', 'idle')
+
             if options.once:
                 break
+
         except TimeoutError as err:
             logging.error(err)
-            if options.once:
-                break
             if options.num_retries < 5:
                 options.num_retries += 1
                 time.sleep(5)
                 continue
             logging.error('Maximum retries exceeded, shutting down')
             raise
-        except RedisError as err:
-            logging.debug("Error communicating with redis: %r", err.message)
-            raise
         except Exception as err:
-            logging.error("something bad happened: %s, %s", err, type(err))
+            logging.error("Unexpected error: %s, %s", err, type(err))
             raise
-        except KeyboardInterrupt:
-            logging.error("KeyboardInterrupt caught, exiting.")
-            redis_store.hset(options.r_name, 'status', 'shut down')
-            redis_store.hset(options.r_name, 'running', 'False')
-            sys.exit(1)
-
 
 def dispatch(job, options):
     """Dispatch a specified job"""
     now = datetime.utcnow()
     logging.info("%s: Dispatching %s", options.name, job)
     redis_store = options.redis_store
-    job_id = u'job:%s' % job.uid
-    redis_store.rpoplpush('%s:queued' % options.name, 'jobs:running')
-    redis_store.hset(job_id, 'last_changed', now)
-    redis_store.hset(job_id, 'status', "running")
+    job_id = f'job:{job.uid}'
+
+    # Move job from queued to running
+    redis_store.rpoplpush(f'{options.name}:queued', 'jobs:running')
+    redis_store.hset(job_id, 'last_changed', now.isoformat())
+    redis_store.hset(job_id, 'status', 'running')
+
     try:
-        if job.download != '':
+        # Handle NCBI download if specified
+        if job.download:
             download_from_ncbi(job, options)
             redis_store.hset(job_id, 'filename', job.filename)
+
+        # Execute the job command
         run_command(job, options)
         job.status = 'done'
+        logging.info("%s: Job %s completed successfully", options.name, job.uid)
+
     except JobFailedError as err:
-        msg, rcode = err[0]
-        job.status = "failed: %s" % msg
-        logging.info("%s: Failed: %s", options.name, msg[-400:])
-        if rcode != 2 or (job.jobtype != "antismash" and job.jobtype != "test1"):
+        msg, rcode = err.args[0]
+        job.status = f"failed: {msg}"
+        logging.error("%s: Job %s failed with error: %s", options.name, job.uid, msg)
+
+        # Send error mail for specific job types and error codes
+        if rcode != 2 or job.jobtype not in ("antismash", "test1"):
             try:
                 send_error_mail(job)
-            except Exception as err:
-                logging.error("Sending error mail failed: %s, %s", err, type(err))
+            except Exception as mail_err:
+                logging.error("Sending error mail failed: %s, %s", mail_err, type(mail_err))
+
+    # Finalize job status
     job.last_changed = datetime.utcnow()
     redis_store.hset(job_id, 'status', job.status)
-    redis_store.hset(job_id, 'last_changed', job.last_changed)
-    redis_store.lrem('jobs:running', job.uid)
+    redis_store.hset(job_id, 'last_changed', job.last_changed.isoformat())
+    redis_store.lrem('jobs:running', 0, job.uid)
     redis_store.lpush('jobs:completed', job.uid)
+
+    # Update job statistics
     timestamps = (
         job.last_changed.strftime("%Y-%m-%d"),  # daily stats
         job.last_changed.strftime("%Y-CW%U"),   # weekly stats
         job.last_changed.strftime("%Y-%m"),     # monthly stats
     )
     for timestamp in timestamps:
-        redis_store.hset('jobs:{timestamp}'.format(timestamp=timestamp), job.uid, job.status.split(":")[0])
+        redis_store.hset(f'jobs:{timestamp}', job.uid, job.status.split(":")[0])
+
+    # Send completion mail
     try:
         send_mail(job)
-    except Exception as err:
-        logging.error("Sending error mail failed: %s, %s", err, type(err))
+    except Exception as mail_err:
+        logging.error("Sending completion mail failed: %s, %s", mail_err, type(mail_err))
+
+    # Clean up status file
     delete_statusfile(job, options)
     logging.info("%s: Done with %s", options.name, job)
+
 
 
 def run_command(job, options):
@@ -274,6 +330,7 @@ def get_antismash3_commandline(job, options):
     if job.asf:
         args.append('--asf')
 
+    args.append('--disable_subgroup')
 
     if job.clusterblast:
         args.append('--clusterblast')
