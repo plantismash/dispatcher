@@ -1,4 +1,5 @@
 watchdog 
 redis
 hiredis
-requests 
+requests
+telnetlib3

@@ -16,15 +16,18 @@
 import os
 import smtplib
 from datetime import datetime
+import telnetlib3
 
-FROMADDR = os.getenv('ANTISMASH_EMAIL_FROM', "antismash@localhost")
-ERRORADDR = os.getenv('ANTISMASH_EMAIL_ERROR', FROMADDR)
-SMTP_SERVER = os.getenv('ANTISMASH_EMAIL_HOST', "localhost")
-SMTP_ENCRYPT = os.getenv('ANTISMASH_EMAIL_ENCRYPT', 'no').lower()
-SMTP_USERNAME = os.getenv('ANTISMASH_EMAIL_USER', '')
-SMTP_PASSWORD = os.getenv('ANTISMASH_EMAIL_PASSWORD', '')
-BASE_URL = os.getenv('ANTISMASH_BASE_URL', 'http://antismash.secondarymetabolites.org')
-TOOL_NAME = os.getenv('ANTISMASH_TOOL_NAME', 'antiSMASH')
+FROMADDR = os.getenv("ANTISMASH_EMAIL_FROM", "antismash@localhost")
+ERRORADDR = os.getenv("ANTISMASH_EMAIL_ERROR", FROMADDR)
+SMTP_SERVER = os.getenv("ANTISMASH_EMAIL_HOST", "localhost")
+SMTP_ENCRYPT = os.getenv("ANTISMASH_EMAIL_ENCRYPT", "no").lower()
+SMTP_USERNAME = os.getenv("ANTISMASH_EMAIL_USER", "")
+SMTP_PASSWORD = os.getenv("ANTISMASH_EMAIL_PASSWORD", "")
+BASE_URL = os.getenv("ANTISMASH_BASE_URL", "http://antismash.secondarymetabolites.org")
+TOOL_NAME = os.getenv("ANTISMASH_TOOL_NAME", "antiSMASH")
+TELNET_MAIL_SERVER = os.getenv("TELNET_MAIL_SERVER", "localhost")
+TELNET_MAIL_DOMAIN = os.getenv("TELNET_MAIL_DOMAIN", "localhost")
 
 message_template = """From: %(from)s
 To: %(to)s
@@ -69,77 +72,129 @@ def send_mail(job):
         return
     msg = compose_message(job)
     try:
-        handle_send(FROMADDR, job.email, msg)
+        # handle_send(FROMADDR, job.email, msg)
+        handle_send_telnet(FROMADDR, job.email, msg)
     except Exception as e:
         print("Failed to send mail: %s" % e)
 
 
 def compose_message(job):
     """Construct the message according to job status"""
-    blocks = {"from": FROMADDR,
-              "to": job.email,
-              "jobid": job.uid,
-              "submitdate": job.added,
-              "filename": job.filename,
-              "tool": TOOL_NAME,
-              "base_url": BASE_URL,
-              "result_file": "index.html",
-              "currdate": datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000"),
-              "status": job.status}
+    blocks = {
+        "from": FROMADDR,
+        "to": job.email,
+        "jobid": job.uid,
+        "submitdate": job.added,
+        "filename": job.filename,
+        "tool": TOOL_NAME,
+        "base_url": BASE_URL,
+        "result_file": "index.html",
+        "currdate": datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000"),
+        "status": job.status,
+    }
 
     if job.status.startswith("done"):
         result_string = success_template
     else:
         result_string = failure_template
 
-    blocks['action_string'] = result_string % blocks
+    blocks["action_string"] = result_string % blocks
 
     return message_template % blocks
 
 
 def send_error_mail(job):
     """Send an email about the failed job to the admin"""
-    blocks = {"from": FROMADDR,
-              "to": ERRORADDR,
-              "tool": TOOL_NAME,
-              "base_url": BASE_URL,
-              "jobid": job.uid,
-              "jobtype": job.jobtype,
-              "filename": job.filename,
-              "gff3": job.gff3,
-              "submitdate": job.added,
-              "currdate": datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000"),
-              "dispatcher": job.dispatcher,
-              "user": job.email,
-              "status": job.status}
+    blocks = {
+        "from": FROMADDR,
+        "to": ERRORADDR,
+        "tool": TOOL_NAME,
+        "base_url": BASE_URL,
+        "jobid": job.uid,
+        "jobtype": job.jobtype,
+        "filename": job.filename,
+        "gff3": job.gff3,
+        "submitdate": job.added,
+        "currdate": datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000"),
+        "dispatcher": job.dispatcher,
+        "user": job.email,
+        "status": job.status,
+    }
 
-    gff3_line = ''
+    gff3_line = ""
     if job.gff3:
-        gff3_line = '\n%(base_url)s/upload/%(jobid)s/%(gff3)s' % blocks
+        gff3_line = "\n%(base_url)s/upload/%(jobid)s/%(gff3)s" % blocks
 
-    blocks['gff3_line'] = gff3_line
+    blocks["gff3_line"] = gff3_line
 
     msg = error_message_template % blocks
     try:
-        handle_send(FROMADDR, ERRORADDR, msg)
+        # handle_send(FROMADDR, ERRORADDR, msg)
+        handle_send_telnet(FROMADDR, ERRORADDR, msg)
     except Exception as e:
         print("Failed to send error mail: %s" % e)
 
 
 def handle_send(from_addr, to_addr, message):
     """Handle the actual email sending"""
-    if SMTP_ENCRYPT == 'no':
+    if SMTP_ENCRYPT == "no":
         server = smtplib.SMTP(SMTP_SERVER, 587)
-    elif SMTP_ENCRYPT == 'tls':
+    elif SMTP_ENCRYPT == "tls":
         server = smtplib.SMTP(SMTP_SERVER, 587)
         server.starttls()
-        if SMTP_USERNAME != '' and SMTP_PASSWORD != '':
+        if SMTP_USERNAME != "" and SMTP_PASSWORD != "":
             server.login(SMTP_USERNAME, SMTP_PASSWORD)
-    elif SMTP_ENCRYPT == 'ssl':
+    elif SMTP_ENCRYPT == "ssl":
         server = smtplib.SMTP_SSL(SMTP_SERVER)
-        if SMTP_USERNAME != '' and SMTP_PASSWORD != '':
+        if SMTP_USERNAME != "" and SMTP_PASSWORD != "":
             server.login(SMTP_USERNAME, SMTP_PASSWORD)
     else:
-        raise Exception('Invalid email configuration')
+        raise Exception("Invalid email configuration")
     server.sendmail(from_addr, [to_addr], message)
     server.quit()
+
+
+def handle_send_telnet(mail_from, mail_to, message):
+    t = telnetlib3.Telnet(host=TELNET_MAIL_SERVER, port=25)
+    try:
+        print("connected")
+
+        t.write(b"EHLO " + bytes(TELNET_MAIL_DOMAIN) + b"\n")
+        print("wrote ehlo")
+        res = t.read_until(b"250 CHUNKING\r\n")
+        print(res)
+        # while True:
+        #     if res == b"250 CHUNKING\r\n":
+        #         break
+
+        t.write(b"MAIL FROM:" + bytes(mail_from) + b"\n")
+        print("wrote from")
+        print(t.read_until(b"\n"))
+
+        t.write(b"RCPT TO:" + bytes(mail_to) + b"\n")
+        print("wrote rcpt")
+        print(t.read_until(b"\n"))
+
+        t.write(b"DATA\n")
+        print("start data")
+        print(t.read_until(b"\n"))
+
+        # t.write(b"Subject: " + bytes(mail_subject, "UTF8") + b"\r\n")
+        # print "wrote"
+        # t.write(b"From: " + bytes(mail_from, "UTF8") + b"\r\n")
+        # print "wrote"
+        # t.write(b"To: " + bytes(mail_to, "UTF8") + b"\r\n")
+        # print "wrote"
+        # t.write(b"\r\n")
+        # print "wrote"
+        t.write(bytes(message) + b"\r\n")
+        print("wrote")
+        t.write(b"\r\n.\r\n")
+        print("wrote")
+    except Exception as e:
+        print(e)
+    finally:
+        t.write(b"QUIT\n")
+        print(t.read_until(b"\n"))
+        print("disconnected telnet")
+        t.close()
