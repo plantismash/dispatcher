@@ -16,7 +16,7 @@
 # along with antiSMASH.  If not, see <http://www.gnu.org/licenses/>.
 """Check for stuck jobs
 """
-from __future__ import print_function
+
 import os
 from os import path
 import redis

@@ -63,7 +63,7 @@ def control_list(args):
     max_jobs: %(max_jobs)s
     running_jobs: %(running_jobs)s"""
 
-        print template % dispatcher
+        print(template % dispatcher)
 
 
 def control_stop(args):
@@ -76,15 +76,15 @@ def control_stop(args):
     for dispatcher_id in dispatcher_ids:
         if redis_store.exists(dispatcher_id):
             redis_store.hset(dispatcher_id, 'stop_scheduled', 'True')
-            print "Stopping dispatcher %s" % redis_store.hget(dispatcher_id, 'name')
+            print("Stopping dispatcher %s" % redis_store.hget(dispatcher_id, 'name'))
 
 
 def control_scale(args):
     redis_store = args.redis_store
     dispatcher_id = "control:{}".format(args.name)
     if not redis_store.exists(dispatcher_id):
-        print "Invalid dispatcher %s" % args.name
+        print("Invalid dispatcher %s" % args.name)
         sys.exit(1)
 
-    print "Setting dispatcher {a.name} max_jobs to {a.jobs}".format(a=args)
+    print("Setting dispatcher {a.name} max_jobs to {a.jobs}".format(a=args))
     redis_store.hset(dispatcher_id, 'max_jobs', args.jobs)

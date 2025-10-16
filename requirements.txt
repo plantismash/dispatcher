@@ -1,5 +1,5 @@
-pyinotify
+watchdog 
 redis
 hiredis
 requests
-subprocess32
+telnetlib3

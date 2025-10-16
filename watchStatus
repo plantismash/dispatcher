@@ -18,47 +18,47 @@
 """
 import os
 from os import path
-import pyinotify
+import time
 from argparse import ArgumentParser
 from datetime import datetime
 from dispatcher.storage import get_storage
-
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
 version = "0.0.2"
 
-class EventHandler(pyinotify.ProcessEvent):
-    """Event handler to grab modify events"""
+class EventHandler(FileSystemEventHandler):
+    """Event handler to track file modifications in the status directory"""
+
     def __init__(self, redis_store):
         self.redis_store = redis_store
 
     def get_job_id(self, event):
-        return path.basename(event.pathname)
+        return path.basename(event.src_path)
 
-    def process_IN_CREATE(self, event):
-        print "New job '%s'" % self.get_job_id(event)
+    def on_created(self, event):
+        if not event.is_directory:
+            print(f"New job '{self.get_job_id(event)}' created")
 
-    def process_IN_DELETE(self, event):
-        print "Removing job '%s'" % self.get_job_id(event)
+    def on_deleted(self, event):
+        if not event.is_directory:
+            print(f"Removing job '{self.get_job_id(event)}'")
 
-    def process_IN_MODIFY(self, event):
-        jobid  = u'job:%s' % self.get_job_id(event)
-        fh = None
-        try:
-            fh = open(event.pathname, 'r')
-            status = fh.readline().strip()
-            self.redis_store.hset(jobid, 'status', status)
-            self.redis_store.hset(jobid, 'last_changed', datetime.utcnow())
-        except IOError, e:
-            print "Failed to get info for '%s': %s" % (jobid, e)
-        finally:
-            if fh is not None:
-                fh.close()
-
+    def on_modified(self, event):
+        if not event.is_directory:
+            jobid = f'job:{self.get_job_id(event)}'
+            try:
+                with open(event.src_path, 'r') as fh:
+                    status = fh.readline().strip()
+                    self.redis_store.hset(jobid, 'status', status)
+                    self.redis_store.hset(jobid, 'last_changed', datetime.utcnow().isoformat())
+            except IOError as e:
+                print(f"Failed to get info for '{jobid}': {e}")
 
 def main():
-    """Parse the command line, set up the database, start the main loop"""
+    """Parse command line, set up the database, start the event loop"""
     default_queue = os.getenv('AS_QUEUE', "redis://localhost:6379/0")
-    parser = ArgumentParser(version=version)
+    parser = ArgumentParser()
     parser.add_argument('-q', '--queue', dest="queue",
                         help="URI of the database containing the job queue (default: %(default)s)",
                         default=default_queue)
@@ -69,15 +69,19 @@ def main():
 
     redis_store = get_storage(options.queue)
     if not path.isdir(options.statusdir):
-        os.mkdir(options.statusdir)
+        os.makedirs(options.statusdir)
 
-    wm = pyinotify.WatchManager()
-    mask = pyinotify.IN_DELETE | pyinotify.IN_CREATE | pyinotify.IN_MODIFY
+    event_handler = EventHandler(redis_store)
+    observer = Observer()
+    observer.schedule(event_handler, options.statusdir, recursive=True)
+    observer.start()
 
-    handler = EventHandler(redis_store)
-    notifier = pyinotify.Notifier(wm, handler)
-    wdd = wm.add_watch(options.statusdir, mask, rec=True)
-    notifier.loop()
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        observer.stop()
+    observer.join()
 
 if __name__ == "__main__":
     main()

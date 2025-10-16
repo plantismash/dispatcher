@@ -100,12 +100,14 @@ def from_dir(options, redis_store):
 
 
 def should_remove_job(job):
-    """check if jobs should be removed"""
+    """check if jobs should be removed from the REDIS database"""
     one_month = timedelta(weeks=4)
     one_week = timedelta(weeks=1)
     now = datetime.utcnow()
 
     status = job.get_short_status()
+
+    return True
 
     if status in ('running', 'pending'):
         return False
